@@ -1,19 +1,6 @@
 use {kernel32, user32};
-use winapi::minwindef::{ATOM, WPARAM, LPARAM, LRESULT, UINT};
-use winapi::windef::{HWND, };
-use winapi::winuser::{
-    COLOR_WINDOW,
-    CW_USEDEFAULT,
-    IDI_APPLICATION,
-    IDC_ARROW,
-    SW_SHOWNORMAL,
-    WM_CREATE,
-    WM_CLOSE, 
-    WM_DESTROY, 
-    WNDCLASSEXW,
-    WS_EX_CLIENTEDGE,
-    WS_OVERLAPPEDWINDOW,
-};
+
+use winapi::*;
 
 use winstr::WinString;
 
@@ -26,8 +13,12 @@ const WINDOW_CLASS_NAME: &'static str = "WinGUIWindow";
 unsafe extern "system" fn window_cb(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
-            let data = &mut *(lparam as *mut WindowData);    
-            data.on_create.take().map(|mut f| f());
+            let create_struct = *(lparam as *mut CREATESTRUCTW);
+            
+            let data = &mut *(create_struct.lpCreateParams as *mut WindowData);    
+            data.on_create.take().map(|mut f| f());  
+
+            user32::SetWindowLongPtrW(hwnd, GWLP_USERDATA, data as *mut _ as LONG_PTR);
         },
         WM_CLOSE => { user32::DestroyWindow(hwnd); },
         WM_DESTROY => { user32::PostQuitMessage(0); },
@@ -117,7 +108,7 @@ unsafe fn open_window(title: &str, data: WindowData) -> HWND {
 
     let title = WinString::new(title);
 
-    let data = Box::new(WindowData::default());
+    let data = Box::new(data);
 
     let hwnd = user32::CreateWindowExW(
         WS_EX_CLIENTEDGE,
