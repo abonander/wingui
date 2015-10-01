@@ -9,7 +9,9 @@ use std::{mem, ptr};
 
 pub fn show_window(title: &str) {
     unsafe {
-        let hwnd = window::open_window(title);
+        let hwnd = window::WindowBuilder::new(title)
+            .on_create(|| println!("Window opened!"))
+            .open();
     
         let mut msg = mem::zeroed();
 
