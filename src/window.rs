@@ -65,7 +65,13 @@ unsafe fn register_window_class() -> ATOM {
         hIconSm: app_icon,
     };
 
-    user32::RegisterClassExW(&class_def)            
+    let atom = user32::RegisterClassExW(&class_def);           
+
+    if atom == 0 {
+        panic!("Failed to register window class! Error code: {}", kernel32::GetLastError());
+    }
+
+    atom
 }
 
 unsafe fn get_class_atom() -> ATOM {

@@ -13,16 +13,9 @@ impl WinString {
     }    
 
     pub fn from_str<S: AsRef<str>>(string: S) -> WinString {
-        let string = string.as_ref();
-        
-        assert!(string.as_bytes().iter().all(|&byte| byte != 0), "String contains null bytes!");
-               
-        let mut data: Vec<_> = <str as AsRef<OsStr>>::as_ref(string).encode_wide().collect();
-        data.push(0);
-        
-        WinString {
-            data: data,
-        }
+        let mut winstr = Self::empty();
+        winstr.replace(string);
+        winstr
     }
 
     pub fn replace<S: AsRef<str>>(&mut self, string: S) {
@@ -30,7 +23,14 @@ impl WinString {
             self.data.set_len(0);
         }
 
+        let string = string.as_ref();
+        
+        assert!(string.as_bytes().iter().all(|&byte| byte != 0), "String contains null bytes!");
 
+        let string: &OsStr = string.as_ref();
+               
+        self.data.extend(string.encode_wide());
+        self.data.push(0);
     } 
 
     pub fn as_ptr(&self) -> *const u16 {
