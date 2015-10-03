@@ -1,5 +1,8 @@
 extern crate wingui;
 
 fn main() {
-    wingui::show_window("This is a test!");
+    wingui::start(
+        "WinGUI Test Window", 
+        |b| b.on_create(|_| println!("Window opened!"))
+    );
 }
