@@ -2,8 +2,11 @@ use {kernel32, user32};
 
 use winapi::*;
 
-use ::{Context, ExnSafePtr};
+use ::{AbsContext, Context, ExnSafePtr, WindowPtr};
+use abs_window::AbsWindow;
 use builder::{Builder, Buildable};
+use context::CURRENT;
+use move_cell::MoveCell;
 use winstr::WinString;
 
 use std::marker::PhantomData;
@@ -14,29 +17,31 @@ static mut CLASS_ATOM: ATOM = 0;
 const WINDOW_CLASS_NAME: &'static str = "WinGUIWindow";
 
 unsafe extern "system" fn window_cb(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let ctxt = Context::mut_ref();
-
     let hwnd = ExnSafePtr(hwnd);    
     let data = ExnSafePtr(user32::GetWindowLongPtrW(hwnd.ptr(), GWLP_USERDATA) as *mut WindowData);
 
     match msg {
         WM_CREATE => {
-            ctxt.catch_panic(move || {
-                let on_create_cb = unsafe {
-                    data.mut_ref().on_create.take()
-                };
+            CURRENT.with(|ctxt| {
+                ctxt.catch_panic(move || {
+                    let on_create_cb = unsafe {
+                        data.as_ref().on_create.take()
+                    };
 
-                let mut window = Window {
-                   hwnd: hwnd.ptr(),
-                   _marker: PhantomData,
-                };
+                    let mut window = Window {
+                       ptr: hwnd.ptr(),
+                       _marker: PhantomData,
+                    };
 
-                on_create_cb.map(|mut f| f(&mut window))
+                    on_create_cb.map(|mut f| f(&mut window))
+                });
             });
-
         },
         WM_CLOSE => { user32::DestroyWindow(hwnd.ptr()); },
-        WM_DESTROY => { user32::PostQuitMessage(0); },
+        WM_DESTROY => { 
+            user32::PostQuitMessage(0);
+            let _ = Box::from_raw(data.ptr());
+        },
         _ => return user32::DefWindowProcW(hwnd.ptr(), msg, wparam, lparam),
     }
 
@@ -48,7 +53,7 @@ unsafe fn register_window_class() -> ATOM {
 
     let app_icon = user32::LoadIconW(ptr::null_mut(), IDI_APPLICATION);
 
-    let class_name = ctxt.convert_str(WINDOW_CLASS_NAME);
+    let class_name = WinString::from_str(WINDOW_CLASS_NAME);
 
     let mut class_def = WNDCLASSEXW {
         cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
@@ -82,77 +87,83 @@ unsafe fn get_class_atom() -> ATOM {
     CLASS_ATOM
 }
 
-pub struct Window<'a> {
-    hwnd: HWND,
-    _marker: PhantomData<&'a ()>,
+pub struct Window {
+    ptr: WindowPtr,
 }
 
-impl<'a> Buildable<'a> for Window<'a> {
-    type Builder = WindowBuilder<'a>;
-}
+impl<'ctxt, 'init> Buildable<'ctxt, 'init> for Window<'ctxt> {
+    type Builder = WindowBuilder<'ctxt, 'init>;
 
-#[derive(Default)]
-struct WindowData {
-    on_create: Option<Box<FnMut(&mut Window)>>,
-    on_show: Option<Box<FnMut(&mut Window)>>,
-}
-
-pub struct WindowBuilder<'a> {
-    ctxt: &'a mut Context,
-    title: &'a str,
-    data: WindowData,
-}
-
-impl<'a> Builder<'a> for WindowBuilder<'a> {
-    type InitArgs = &'a str;
-    type Final = Window<'a>;
-
-    fn new(ctxt: &'a mut Context, title: &'a str) -> Self {
+    fn builder(ctxt: &'ctxt Context, title: &'init str) -> WindowBuilder<'ctxt, 'init> {
         WindowBuilder {
             ctxt: ctxt,
             title: title,
             data: WindowData::default(),
         }
     }
+}
 
-    fn build(self) -> Window<'a> {
+unsafe impl<'ctxt> AbsContext for Window<'ctxt> {}
+
+unsafe impl<'ctxt> AbsWindow for Window<'ctxt> {
+    fn ptr(&self) -> WindowPtr { self.ptr }
+}
+
+#[derive(Default)]
+struct WindowData {
+    on_create: MoveCell<Box<FnMut(&Window)>>,
+    on_show: MoveCell<Box<FnMut(&Window)>>,
+}
+
+pub struct WindowBuilder<'ctxt, 'init> {
+    ctxt: &'ctxt Context,
+    title: &'init str,
+    data: WindowData,
+}
+
+impl<'ctxt, 'init> Builder<'ctxt, 'init> for WindowBuilder<'ctxt, 'init> {
+    type Context = Context;
+    type InitArgs = &'init str;
+    type Final = Window<'ctxt>;
+
+    fn build(self) -> Window<'ctxt> {
         let WindowBuilder { ctxt, title, data } = self;
-
-        let title = ctxt.convert_str(title);
         
         let hwnd = unsafe {
             open_window(title, data)
         };
 
-        Window { hwnd: hwnd, _marker: PhantomData }
+        Window { ptr: hwnd, ctxt: ctxt }
     }
 }
 
-impl<'a> WindowBuilder<'a> {
-    pub fn title(mut self, title: &'a str) -> Self {
+impl<'ctxt, 'init> WindowBuilder<'ctxt, 'init> {
+    pub fn title(mut self, title: &'init str) -> Self {
         self.title = title;
         self
     }
 
-    pub fn on_create<F: FnOnce(&mut Window) + 'static>(mut self, on_create: F) -> Self {
+    pub fn on_create<F: FnOnce(&Window) + 'static>(mut self, on_create: F) -> Self {
         let mut on_create = Some(on_create);
 
         // This is a hack around the fact that `Box<FnOnce()>` cannot be directly invoked.
-        self.data.on_create = Some(Box::new(
+        self.data.on_create.set(Box::new(
             move |win| if let Some(f) = on_create.take() { f(win); }
         ));
 
         self
     }
 
-    pub fn on_show<F: FnMut(&mut Window) + 'static>(mut self, on_show: F) -> Self {
-        self.data.on_show = Some(Box::new(on_show));
+    pub fn on_show<F: FnMut(&Window) + 'static>(mut self, on_show: F) -> Self {
+        self.data.on_show.set(Box::new(on_show));
         self
     }
 }
 
-unsafe fn open_window(title: &WinString, data: WindowData) -> HWND {
+unsafe fn open_window(title: &str, data: WindowData) -> WindowPtr {
     let class_atom = get_class_atom();
+
+    let title = WinString::from_str(title);
 
     let data = Box::new(data);
 
@@ -165,9 +176,7 @@ unsafe fn open_window(title: &WinString, data: WindowData) -> HWND {
         ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut(),
     );
 
-    if hwnd.is_null() {
-        panic!("Failed to open window! Error Code: {}", kernel32::GetLastError());
-    }
+    ::win32_null_chk(hwnd);
 
     user32::SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(data) as LONG_PTR);     
 

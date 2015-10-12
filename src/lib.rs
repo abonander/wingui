@@ -1,16 +1,22 @@
-#![feature(catch_panic)]
+#![feature(associated_type_defaults, catch_panic)]
+
+#[macro_use] extern crate lazy_static;
 
 extern crate winapi;
 extern crate kernel32;
 extern crate user32;
 
+mod abs_window;
 mod builder;
+mod context;
+mod move_cell;
 mod winstr;
 mod window;
 
-use builder::Builder;
+pub mod text;
+
 use winstr::WinString;
-use window::WindowBuilder;
+use window::{Window, WindowBuilder};
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -20,78 +26,17 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::{mem, ptr, thread};
 
-thread_local! {
-    static CURRENT_CTXT: UnsafeCell<Context> = UnsafeCell::new(Context::new())
-}
+pub type WindowPtr = winapi::HWND;
 
-pub struct Context {
-    con_buf: WinString,
-    last_err: Option<Cow<'static, str>>,
-}
-
-impl Context {
-    fn new() -> Context {
-        Context { 
-            con_buf: WinString::empty(), 
-            last_err: None, 
-        }
-    }
-
-    unsafe fn mut_ref<'a>() -> &'a mut Self {
-        let ctxt_ptr = CURRENT_CTXT.with(|ctxt| ctxt.get());
-        &mut *ctxt_ptr
-    }
-
-    /// Convert a Rust string to UTF-16.
-    /// 
-    /// The returned pointer should be valid until the next time this is called. 
-    fn convert_str<S: AsRef<str>>(&mut self, string: S) -> &WinString {        
-        self.con_buf.replace(string);
-        &self.con_buf
-    }
-
-    fn set_err(&mut self, err: Box<Any + Send + 'static>) {
-        let cow = match err.downcast::<String>() {
-            Ok(err_msg) => (&*err_msg).clone().into(),
-            Err(err) => match err.downcast::<&'static str>() {
-                Ok(err_msg) => (&*err_msg).clone().into(),
-                Err(err) => format!("{:?}", err).into(),
-            }
-        };
-
-        self.last_err = Some(cow);
-    }
-
-    fn reset(&mut self) {
-        let last_err = self.last_err.take();
-
-        if let Some(last_err) = last_err {
-            panic!("{}", last_err);
-        }
-    }
-
-    fn catch_panic<R, F: FnOnce() -> R + Send + 'static>(&mut self, closure: F) -> Option<R> {
-        match thread::catch_panic(closure) {
-            Ok(ret) => Some(ret),
-            Err(err) => {
-                self.set_err(err);
-                None
-            },
-        }
-    }
-
-
-    pub fn window<'a>(&'a mut self, title: &'a str) -> WindowBuilder<'a> {
-        WindowBuilder::new(self, title)
-    }
-}
+pub use builder::{Builder, Buildable};
+pub use context::{AbsContext, Context, CURRENT};
 
 #[derive(Copy, Clone)]
 struct ExnSafePtr<T>(*mut T);
 
 impl<T> ExnSafePtr<T> {
-    unsafe fn mut_ref(&self) -> &mut T {
-        &mut *self.0
+    unsafe fn as_ref(&self) -> &T {
+        & *self.0
     }
 
     fn ptr(&self) -> *mut T {
@@ -101,14 +46,12 @@ impl<T> ExnSafePtr<T> {
 
 unsafe impl<T> Send for ExnSafePtr<T> {}
 
-pub fn start<F>(title: &str, window_fn: F) 
-where F: for<'a> FnOnce(WindowBuilder<'a>) -> WindowBuilder<'a> {
+pub fn start<F>(title: &str, window_fn: F) where F: FnOnce(WindowBuilder) -> WindowBuilder {
     unsafe {
-        {
-            let mut ctxt = Context::mut_ref();         
-            window_fn(WindowBuilder::new(&mut ctxt, title))
+        CURRENT.with(|ctxt| {
+            window_fn(Window::builder(&ctxt, title))
                 .build();
-        }
+        });
 
         let mut msg = mem::zeroed();
 
@@ -117,7 +60,12 @@ where F: for<'a> FnOnce(WindowBuilder<'a>) -> WindowBuilder<'a> {
             user32::DispatchMessageW(&msg);
         }
 
-        Context::mut_ref().reset()
+        CURRENT.with(Context::reset);
     }    
+}
+
+unsafe fn win32_null_chk(ptr: WindowPtr) -> WindowPtr {
+    assert!(!ptr.is_null(), "Windows operation failed! Error Code: {}", kernel32::GetLastError());
+    ptr
 }
 
