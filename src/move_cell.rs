@@ -1,21 +1,22 @@
 use std::cell::UnsafeCell;
 use std::mem;
 
-#[derive(Default)]
 pub struct MoveCell<T> {
     inner: UnsafeCell<Option<T>>,
 }
 
 impl<T> MoveCell<T> {
     pub fn new() -> MoveCell<T> {
-        MoveCell {
-            inner: UnsafeCell::new(None),
-        }
+        Self::with_opt(None)   
     }
 
     pub fn with_val(val: T) -> MoveCell<T> {
+        Self::with_opt(Some(val))
+    }
+
+    pub fn with_opt(opt: Option<T>) -> MoveCell<T> {
         MoveCell {
-            inner: UnsafeCell::new(Some(val)),
+            inner: UnsafeCell::new(opt)
         }
     }
 
@@ -46,18 +47,22 @@ impl<T> MoveCell<T> {
     }
 
     pub fn with_mut_ref<F, R>(&self, mut_fn: F) -> Option<R> where F: FnOnce(&mut T) -> R {
-        let val = self.take();
-
-        let ret = val.as_mut().map(mut_fn);
-
-        self.set(val);
-
-        ret
+        self.take().map(|mut val| {
+            let ret = mut_fn(&mut val);
+            self.set(val);
+            ret
+        })
     }
 }
 
 impl<T: Clone> Clone for MoveCell<T> {
     fn clone(&self) -> MoveCell<T> {
-        self.with_mut_ref(T::clone)
+        Self::with_opt(self.with_mut_ref(|val| val.clone()))
+    }
+}
+
+impl<T> Default for MoveCell<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
