@@ -54,19 +54,3 @@ impl WinString {
     }
 }
 
-#[doc(hidden)]
-pub mod consts {
-    macro_rules! static_winstr {
-        ($(pub static $strname:ident = $strexpr:expr);*;) => (
-            lazy_static! {
-                $(pub static ref $strname: ::winstr::WinString = ::winstr::WinString::from_str($strexpr);)*
-            }
-        )
-    }
-
-    pub const EMPTY_STR: *const u16 = &0;
-
-    static_winstr! {
-        pub static STATIC = "STATIC";
-    }
-}
