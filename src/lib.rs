@@ -1,5 +1,6 @@
 #![feature(const_fn, std_panic, recover)]
 
+#[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
 
 extern crate winapi;

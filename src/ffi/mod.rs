@@ -5,13 +5,15 @@ use {kernel32, user32};
 use winstr::WinString;
 
 use std::marker::PhantomData;
-use std::sync::Once;
+use std::sync::RwLock;
 
 use std::{mem, panic, ptr};
 
+mod class;
+
 const RET_ERR: LRESULT = -1;
 
-unsafe extern "system" fn window_proc<W: WindowClass>(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn window_proc<W: WindowEvents>(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let mut handle;
     
     if msg == WM_CREATE {
@@ -25,8 +27,7 @@ unsafe extern "system" fn window_proc<W: WindowClass>(hwnd: HWND, msg: UINT, wpa
             return RET_ERR;
         }
     }
-
-    
+     
     let res = match msg { 
         WM_CREATE => ::recover(|| { W::on_create(&handle); 0 }),
         WM_DESTROY => {
@@ -34,72 +35,29 @@ unsafe extern "system" fn window_proc<W: WindowClass>(hwnd: HWND, msg: UINT, wpa
             handle.cleanup();
             res
         },
-        _ => ::recover(|| W::handle_msg(&handle, msg)),
+        _ => {
+            let mut res = ::recover(|| W::handle_msg(&handle, msg));
+
+            if res == Some(RET_ERR) {
+                res = Some(::user32::DefWindowProcW(hwnd, msg, wparam, lparam));
+            }
+
+            res
+        },
     };
 
     res.unwrap_or(RET_ERR)
 }
 
-fn class_atom<W: WindowClass>() -> ATOM {
-        static CLASS_INIT: Once = Once::new();
-        static mut CLASS_ATOM: ATOM = 0;
-
-        CLASS_INIT.call_once(|| unsafe { 
-            CLASS_ATOM = register_class::<W>();
-               
-            if CLASS_ATOM == 0 {
-                error!(
-                    "Failed to register window class {:?}. Error code: {:X}", 
-                       W::name(), ::last_error_code()
-                );
-            }
-        });
-                
-        let atom = unsafe { CLASS_ATOM };
- 
-        assert!(
-            atom != 0,
-            "Window class {:?} failed to initialize. Check the logs for more information.",
-            W::name()
-        );
-
-        atom 
-    }
-
-unsafe fn register_class<W: WindowClass>() -> ATOM {
-    let class_name = WinString::from_str(W::name());
-
-    let menu_name = W::menu_name().map(WinString::from_str);
-
-    let class_def = WNDCLASSEXW {
-        cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
-        style: 0,
-        lpfnWndProc: Some(window_proc::<W>),
-        cbClsExtra: 0,
-        cbWndExtra: mem::size_of::<*mut <W as WindowClass>::Data>() as i32,
-        hInstance: ptr::null_mut(),
-        hIcon: W::icon(),
-        hCursor: W::cursor(),
-        hbrBackground: W::background_brush(),
-        lpszMenuName: menu_name.as_ref().map_or_else(ptr::null, WinString::as_ptr),
-        lpszClassName: class_name.as_ptr(),
-        hIconSm: W::small_icon(),
-    };
-
-    user32::RegisterClassExW(&class_def)        
-}
-
-
-pub struct WindowHandle<W: WindowClass> {
+pub struct WindowHandle<W: WindowEvents> {
     hwnd: HWND,
-    data: *mut <W as WindowClass>::Data,
+    data: *mut <W as WindowEvents>::Data,
     fresh: bool,
 }
 
-impl<W: WindowClass> WindowHandle<W> {
-    fn create_instance(data: <W as WindowClass>::Data) -> Result<Self, DWORD> {
+impl<W: WindowEvents> WindowHandle<W> {
+    fn create_instance(class_atom: DWORD, data: <W as WindowEvents>::Data) -> Result<Self, DWORD> {
         let window_name = data.name().map_or_else(ptr::null, WinString::as_ptr);
-        let class_atom = class_atom::<W>();
 
         let pos = data.pos();
         let size = data.size();
@@ -125,11 +83,6 @@ impl<W: WindowClass> WindowHandle<W> {
         if hwnd.is_null() {
             Err(::last_error_code())
         } else {
-            unsafe {
-                user32::ShowWindow(hwnd, SW_SHOWNORMAL);
-                user32::UpdateWindow(hwnd);
-            }
-
             Ok(WindowHandle {
                 hwnd: hwnd,
                 data: data_ptr,
@@ -138,7 +91,7 @@ impl<W: WindowClass> WindowHandle<W> {
         }
     }
 
-    fn from_ptrs(hwnd: HWND, data: *mut <W as WindowClass>::Data) -> Self {
+    fn from_ptrs(hwnd: HWND, data: *mut <W as WindowEvents>::Data) -> Self {
         WindowHandle {
             hwnd: hwnd,
             data: data,
@@ -166,14 +119,14 @@ impl<W: WindowClass> WindowHandle<W> {
         self.hwnd
     }
 
-    unsafe fn data_mut(&self) -> &mut <W as WindowClass>::Data {
+    unsafe fn data_mut(&self) -> &mut <W as WindowEvents>::Data {
         &mut *self.data
     }
 }        
 
-impl<W: WindowClass> panic::RecoverSafe for WindowHandle<W> {}
+impl<W: WindowEvents> panic::NoUnsafeCell for WindowHandle<W> {}
 
-impl<W: WindowClass> Clone for WindowHandle<W> {
+impl<W: WindowEvents> Clone for WindowHandle<W> {
     fn clone(&self) -> Self {
         WindowHandle {
             hwnd: self.hwnd,
@@ -183,7 +136,7 @@ impl<W: WindowClass> Clone for WindowHandle<W> {
     }
 }
 
-impl<W: WindowClass> Drop for WindowHandle<W> {
+impl<W: WindowEvents> Drop for WindowHandle<W> {
     fn drop(&mut self) {
         if self.fresh {
             unsafe {
@@ -193,20 +146,8 @@ impl<W: WindowClass> Drop for WindowHandle<W> {
     }
 }
 
-pub trait WindowClass: Sized {
+pub trait WindowEvents: Sized {
     type Data: WindowData;
-
-    fn name() -> &'static str; 
- 
-    unsafe fn icon() -> HICON { ptr::null_mut() }
-
-    unsafe fn small_icon() -> HICON { ptr::null_mut() }
-
-    unsafe fn cursor() -> HCURSOR { ptr::null_mut() }
-
-    unsafe fn background_brush() -> HBRUSH { (COLOR_WINDOW + 1) as usize as *mut _ }
-
-    unsafe fn menu_name() -> Option<&'static str> { None }
 
     fn on_create(_: &WindowHandle<Self>) {}
 
@@ -229,4 +170,6 @@ pub trait WindowData {
     fn parent(&self) -> HWND { ptr::null_mut() }
 
     fn menu(&self) -> HMENU { ptr::null_mut() }
+
+    fn is_subclass(&self) -> bool { true }
 }
