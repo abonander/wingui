@@ -5,13 +5,24 @@ use {kernel32, user32};
 use winstr::WinString;
 
 use std::marker::PhantomData;
+use std::panic::AssertRecoverSafe;
 use std::sync::RwLock;
 
-use std::{mem, panic, ptr};
+use std::{mem, ptr, thread};
 
 mod class;
 
 const RET_ERR: LRESULT = -1;
+
+macro_rules! unwrap_or_ret (
+    ($expr:expr, $or:expr) => (
+        if let Some(val) = $expr {
+            val
+        } else {
+            return $or;
+        }
+    )
+);
 
 unsafe extern "system" fn window_proc<W: WindowEvents>(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let mut handle;
@@ -21,17 +32,20 @@ unsafe extern "system" fn window_proc<W: WindowEvents>(hwnd: HWND, msg: UINT, wp
         handle = WindowHandle::from_ptrs(hwnd, data);
         user32::SetWindowLongPtrW(hwnd, GWLP_USERDATA, data as i64);
     } else {
-        if let Some(handle_) = WindowHandle::from_hwnd(hwnd) {
-            handle = handle_;
-        } else {
-            return RET_ERR;
-        }
+        handle = unwrap_or_ret!(WindowHandle::from_hwnd(hwnd), RET_ERR);
     }
+
+    let mut handle = AssertRecoverSafe::new(&mut handle);
      
     let res = match msg { 
         WM_CREATE => ::recover(|| { W::on_create(&handle); 0 }),
         WM_DESTROY => {
-            let res = ::recover(|| { W::on_destroy(&handle); 0 });
+            let mut res = Some(RET_ERR);
+
+            if !thread::panicking() { 
+                res = ::recover(|| { W::on_destroy(&handle); 0 });
+            }
+
             handle.cleanup();
             res
         },
@@ -110,9 +124,9 @@ impl<W: WindowEvents> WindowHandle<W> {
     } 
     
     unsafe fn cleanup(&mut self) {
+        self.fresh = false;
         user32::DestroyWindow(self.hwnd);
         Box::from_raw(self.data);
-        self.fresh = false;
     }
 
     fn hwnd(&self) -> HWND {
@@ -123,8 +137,6 @@ impl<W: WindowEvents> WindowHandle<W> {
         &mut *self.data
     }
 }        
-
-impl<W: WindowEvents> panic::NoUnsafeCell for WindowHandle<W> {}
 
 impl<W: WindowEvents> Clone for WindowHandle<W> {
     fn clone(&self) -> Self {
@@ -172,4 +184,13 @@ pub trait WindowData {
     fn menu(&self) -> HMENU { ptr::null_mut() }
 
     fn is_subclass(&self) -> bool { true }
+}
+
+pub unsafe fn destroy_thread_windows() -> BOOL {
+    unsafe extern "system" fn destroy_thread_proc(hwnd: HWND, _: LPARAM) -> BOOL {
+        user32::DestroyWindow(hwnd)
+    }
+
+    let thread_id = kernel32::GetCurrentThreadId();
+    user32::EnumThreadWindows(thread_id, Some(destroy_thread_proc), 0)
 }
