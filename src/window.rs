@@ -4,6 +4,7 @@ use winapi::*;
 
 //use builder::{Builder, Buildable};
 use ffi::{WindowHandle, WindowClass, WindowData};
+use ffi::class::{Class, CustomClass};
 use winstr::WinString;
 
 use std::borrow::Cow;
@@ -18,32 +19,57 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new<T: Into<Cow<'static, str>>(title: ) -> Window {
-        
+    pub fn new<T: AsRef<str>>(title: T) -> Window {
+        let data = Data::new(title);
+        let hnd = WindowHandle::new_instance(Class::atom(), data);
 
-        let hnd = WindowHandle::new_instance(
-
-
-}
-
-unsafe impl<'ctxt> AbsWindow for Window<'ctxt> {
-    fn ptr(&self) -> WindowPtr { self.ptr }
+        Window {
+            hnd: hnd
+        }
+    }
 }
 
 #[derive(Default)]
 struct Data {
-    title: Cow<'static, str>,
+    title: WinString,
     on_create: Option<FnBox(&mut Window)>,
     on_show: Option<Box<FnMut(&mut Window)>>,
 }
 
-impl WindowData for Data {
+impl Data {
+    fn new<T: AsRef<str>>(title: T) -> Data {
+        Data { title: WinString::from_str(title), ... Data::default() }
+    }
+}
 
+impl WindowData for Data {
+    fn name(&self) -> Option<&WinString> {
+        Some(&self.title)
+    }
 }
 
 struct Class;
 
-impl WindowClass for Class {
+impl WindowEvents for Class {
     type Data = Data;
+
+    fn on_create(hnd: &WindowHandle<Self>) {
+        unsafe {
+            self.data_mut().on_create.take()
+        }.map(|on_create| (on_create)());
+    }
+
+    fn on_show(hnd: &WindowHandle<Self>) {
+        unsafe {
+            self.data_mut().on_show.as_mut()
+        }.map(|on_show| (on_show)())
+    }
 }
 
+impl CustomClass for Class {
+    type Events = Self;
+
+    fn name() -> &'static str {
+        "WinGUI Main Window"
+    }
+}

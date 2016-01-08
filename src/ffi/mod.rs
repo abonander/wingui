@@ -70,7 +70,7 @@ pub struct WindowHandle<W: WindowEvents> {
 }
 
 impl<W: WindowEvents> WindowHandle<W> {
-    fn create_instance(class_atom: DWORD, data: <W as WindowEvents>::Data) -> Result<Self, DWORD> {
+    fn create_instance(class: LPCWSTR, data: <W as WindowEvents>::Data) -> Result<Self, DWORD> {
         let window_name = data.name().map_or_else(ptr::null, WinString::as_ptr);
 
         let pos = data.pos();
@@ -83,7 +83,7 @@ impl<W: WindowEvents> WindowHandle<W> {
         let hwnd = unsafe {
             user32::CreateWindowExW(
                 WS_EX_CLIENTEDGE,
-                class_atom as *const u16,
+                class,
                 window_name,
                 WS_OVERLAPPEDWINDOW,
                 pos[0], pos[1], size[0], size[1],
