@@ -16,6 +16,12 @@ use self::traits::{WindowEvents, WindowData};
 pub mod class;
 pub mod traits;
 
+mod error;
+
+pub use self::error::WindowsError;
+
+pub type FFIResult<T> = Result<T, WindowsError>;
+
 const RET_ERR: LRESULT = -1;
 
 macro_rules! unwrap_or_ret (
@@ -35,7 +41,7 @@ pub struct WindowHandle<W: WindowEvents> {
 }
 
 impl<W: WindowEvents> WindowHandle<W> {
-    fn create_instance<C: Class>(class: C, data: <W as WindowEvents>::Data) -> Result<Self, DWORD> {
+    pub fn create_instance<C: Class>(class: C, data: <W as WindowEvents>::Data) -> FFIResult<Self> {
         let window_name = data.name().map_or_else(ptr::null, WinString::as_ptr);
 
         let pos = data.pos();
@@ -58,7 +64,7 @@ impl<W: WindowEvents> WindowHandle<W> {
         };
 
         if hwnd.is_null() {
-            Err(::last_error_code())
+            Err(WindowsError::last())
         } else {
             let orig_proc = if class.is_system() {
                 unsafe { set_wnd_proc::<W>(hwnd) }
@@ -119,7 +125,7 @@ impl<W: WindowEvents> WindowHandle<W> {
         self.hwnd
     }
 
-    unsafe fn data_mut(&self) -> &mut <W as WindowEvents>::Data {
+    pub unsafe fn data_mut(&self) -> &mut <W as WindowEvents>::Data {
         &mut (*self.data).window_data
     }
 

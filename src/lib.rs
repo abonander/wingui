@@ -1,4 +1,4 @@
-#![feature(const_fn, std_panic, recover)]
+#![feature(const_fn, std_panic, recover, fnbox)]
 
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
@@ -18,7 +18,7 @@ pub mod window;
 
 pub use move_cell::MoveCell;
 use winstr::WinString;
-//use window::{Window, WindowBuilder};
+use window::Window;
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -55,49 +55,8 @@ pub fn start<F>(init_fn: F) where F: FnOnce() -> Window {
     }
 }
 
-fn last_error_code() -> winapi::DWORD {
-    unsafe {
-        kernel32::GetLastError()
-    }
-}
-
-fn last_err_msg() -> Result<String, winapi::DWORD> {
-    use winapi::*;
-
-    const FMT_FLAGS: DWORD = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM;
-
-    let mut buf_ptr: *const u16 = ptr::null_mut();
-
-    let buf = unsafe {
-        let len = kernel32::FormatMessageW(
-            FMT_FLAGS, ptr::null(), last_error_code(), 0,
-            &mut buf_ptr as *const _ as LPWSTR,
-            0, ptr::null_mut()
-        ) as usize;
-
-        if len == 0 {
-            return Err(last_error_code());
-        }
-
-        slice::from_raw_parts(buf_ptr, len)
-    };
-
-    let ret = String::from_utf16_lossy(buf);
-    
-    unsafe {
-        if kernel32::HeapFree(kernel32::GetProcessHeap(), 0, buf_ptr as *mut _) == 0 {
-            return Err(last_error_code());
-        }
-    }
-
-    Ok(ret)
-}
-
 fn post_last_err_msg() {
-    post_error(
-        last_err_msg()
-            .unwrap_or_else(|dword| format!("Win32 Error Code: {}", dword))
-    )
+    post_error(ffi::WindowsError::last())
 }
 
 fn post_error<E: Any + Send>(err: E) {

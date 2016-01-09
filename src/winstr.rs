@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
-
 pub struct WinString {
     data: Vec<u16>,
 }
@@ -51,6 +50,12 @@ impl WinString {
 
     pub fn to_string(&self) -> String {
         String::from_utf16_lossy(&self.data)
+    }
+}
+
+impl Default for WinString {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 

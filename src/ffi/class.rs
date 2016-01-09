@@ -3,6 +3,7 @@ use winapi::*;
 
 use winstr::WinString;
 
+use super::error::WindowsError;
 use super::traits::WindowEvents;
 
 use std::collections::HashMap;
@@ -59,8 +60,8 @@ pub fn class_atom<W: CustomClass>() -> ATOM {
             classes.insert(W::name(), atom);
         } else {
             error!(
-                "Failed to register window class {:?}. Error code: {:X}", 
-                W::name(), ::last_error_code()
+                "Failed to register window class {:?}. Error message: {}", 
+                W::name(), WindowsError::last()
             );     
         }
 
