@@ -11,8 +11,6 @@ use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::{mem, ptr};
 
-const WINDOW_CLASS_NAME: &'static str = "WinGUIWindow";
-
 #[derive(Clone)]
 pub struct Window {
     hnd: WindowHandle<Class>,
@@ -21,11 +19,15 @@ pub struct Window {
 impl Window {
     pub fn new<T: AsRef<str>>(title: T) -> Window {
         let data = Data::new(title);
-        let hnd = WindowHandle::new_instance(Class::atom(), data);
+        let hnd = WindowHandle::new_instance(Class, data);
 
         Window {
             hnd: hnd
         }
+    }
+
+    pub fn add_child<W: WindowEvents, C: BorrowHandle<W>>(&mut self, child: C) -> &mut Self {
+
     }
 }
 

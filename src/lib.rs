@@ -8,14 +8,13 @@ extern crate kernel32;
 extern crate user32;
 
 //mod abs_window;
-//mod builder;
 //mod context;
 mod ffi;
 mod move_cell;
 mod winstr;
-//mod window;
 
-//pub mod text;
+pub mod window;
+// pub mod text;
 
 pub use move_cell::MoveCell;
 use winstr::WinString;
@@ -30,8 +29,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::{mem, ptr, slice, thread};
 
 use std::panic::{self, RecoverSafe};
-
-pub type Window = ();
 
 thread_local!(static LAST_ERR: MoveCell<Box<Any + Send>> = MoveCell::new());
 

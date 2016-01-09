@@ -10,7 +10,11 @@ use std::sync::RwLock;
 
 use std::{mem, ptr, thread};
 
-mod class;
+use self::class::Class;
+use self::traits::{WindowEvents, WindowData};
+
+pub mod class;
+pub mod traits;
 
 const RET_ERR: LRESULT = -1;
 
@@ -24,53 +28,14 @@ macro_rules! unwrap_or_ret (
     )
 );
 
-unsafe extern "system" fn window_proc<W: WindowEvents>(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let mut handle;
-    
-    if msg == WM_CREATE {
-        let data = (*(lparam as *mut CREATESTRUCTW)).lpCreateParams as *mut _;
-        handle = WindowHandle::from_ptrs(hwnd, data);
-        user32::SetWindowLongPtrW(hwnd, GWLP_USERDATA, data as i64);
-    } else {
-        handle = unwrap_or_ret!(WindowHandle::from_hwnd(hwnd), RET_ERR);
-    }
-
-    let mut handle = AssertRecoverSafe::new(&mut handle);
-     
-    let res = match msg { 
-        WM_CREATE => ::recover(|| { W::on_create(&handle); 0 }),
-        WM_DESTROY => {
-            let mut res = Some(RET_ERR);
-
-            if !thread::panicking() { 
-                res = ::recover(|| { W::on_destroy(&handle); 0 });
-            }
-
-            handle.cleanup();
-            res
-        },
-        _ => {
-            let mut res = ::recover(|| W::handle_msg(&handle, msg));
-
-            if res == Some(RET_ERR) {
-                res = Some(::user32::DefWindowProcW(hwnd, msg, wparam, lparam));
-            }
-
-            res
-        },
-    };
-
-    res.unwrap_or(RET_ERR)
-}
-
 pub struct WindowHandle<W: WindowEvents> {
     hwnd: HWND,
-    data: *mut <W as WindowEvents>::Data,
+    data: *mut ProcData<<W as WindowEvents>::Data>,
     fresh: bool,
 }
 
 impl<W: WindowEvents> WindowHandle<W> {
-    fn create_instance(class: LPCWSTR, data: <W as WindowEvents>::Data) -> Result<Self, DWORD> {
+    fn create_instance<C: Class>(class: C, data: <W as WindowEvents>::Data) -> Result<Self, DWORD> {
         let window_name = data.name().map_or_else(ptr::null, WinString::as_ptr);
 
         let pos = data.pos();
@@ -78,34 +43,51 @@ impl<W: WindowEvents> WindowHandle<W> {
         let parent = data.parent();
         let menu = data.menu();
 
-        let data_ptr = Box::into_raw(Box::new(data));
-
         let hwnd = unsafe {
             user32::CreateWindowExW(
                 WS_EX_CLIENTEDGE,
-                class,
+                class.atom(),
                 window_name,
                 WS_OVERLAPPEDWINDOW,
                 pos[0], pos[1], size[0], size[1],
                 parent,
                 menu,
                 ptr::null_mut(),
-                data_ptr as LPVOID,
+                ptr::null_mut(),
             )
         };
 
         if hwnd.is_null() {
             Err(::last_error_code())
         } else {
-            Ok(WindowHandle {
+            let orig_proc = if class.is_system() {
+                unsafe { set_wnd_proc::<W>(hwnd) }
+            } else {
+                None
+            };
+
+            let proc_data = ProcData {
+                orig_proc: orig_proc,
+                window_data: data,
+            };
+
+            let data_ptr = Box::into_raw(Box::new(proc_data));
+
+            let handle = WindowHandle {
                 hwnd: hwnd,
                 data: data_ptr,
                 fresh: true,
-            })
+            };
+
+            // No recover here because this will be called by user code,
+            // so panics should be allowed to propagate.
+            W::on_create(&handle);
+
+            Ok(handle)
         }
     }
 
-    fn from_ptrs(hwnd: HWND, data: *mut <W as WindowEvents>::Data) -> Self {
+    fn from_ptrs(hwnd: HWND, data: *mut ProcData<<W as WindowEvents>::Data>) -> Self {
         WindowHandle {
             hwnd: hwnd,
             data: data,
@@ -126,7 +108,11 @@ impl<W: WindowEvents> WindowHandle<W> {
     unsafe fn cleanup(&mut self) {
         self.fresh = false;
         user32::DestroyWindow(self.hwnd);
-        Box::from_raw(self.data);
+
+        if !self.data.is_null() {
+            Box::from_raw(self.data);
+            self.data = ptr::null_mut();
+        }
     }
 
     fn hwnd(&self) -> HWND {
@@ -134,7 +120,11 @@ impl<W: WindowEvents> WindowHandle<W> {
     }
 
     unsafe fn data_mut(&self) -> &mut <W as WindowEvents>::Data {
-        &mut *self.data
+        &mut (*self.data).window_data
+    }
+
+    unsafe fn orig_proc(&self) -> WindowProc {
+        (*self.data).orig_proc()
     }
 }        
 
@@ -158,34 +148,6 @@ impl<W: WindowEvents> Drop for WindowHandle<W> {
     }
 }
 
-pub trait WindowEvents: Sized {
-    type Data: WindowData;
-
-    fn on_create(_: &WindowHandle<Self>) {}
-
-    fn on_show(_: &WindowHandle<Self>) {}
-
-    fn on_hide(_: &WindowHandle<Self>) {}
-
-    fn on_destroy(_: &WindowHandle<Self>) {}
-
-    fn handle_msg(_: &WindowHandle<Self>, msg: DWORD) -> LRESULT { RET_ERR }
-}
-
-pub trait WindowData {
-    fn name(&self) -> Option<&WinString> { None } 
-
-    fn pos(&self) -> [c_int; 2] { [CW_USEDEFAULT, CW_USEDEFAULT] }
-
-    fn size(&self) -> [c_int; 2] { [CW_USEDEFAULT, CW_USEDEFAULT] }
-
-    fn parent(&self) -> HWND { ptr::null_mut() }
-
-    fn menu(&self) -> HMENU { ptr::null_mut() }
-
-    fn is_subclass(&self) -> bool { true }
-}
-
 pub unsafe fn destroy_thread_windows() -> BOOL {
     unsafe extern "system" fn destroy_thread_proc(hwnd: HWND, _: LPARAM) -> BOOL {
         user32::DestroyWindow(hwnd)
@@ -194,3 +156,59 @@ pub unsafe fn destroy_thread_windows() -> BOOL {
     let thread_id = kernel32::GetCurrentThreadId();
     user32::EnumThreadWindows(thread_id, Some(destroy_thread_proc), 0)
 }
+
+type WindowProc = unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT;
+
+unsafe fn set_wnd_proc<W: WindowEvents>(hwnd: HWND) -> Option<WindowProc> {
+    mem::transmute(user32::SetWindowLongPtrW(hwnd, GWLP_WNDPROC, window_proc::<W> as LONG_PTR))
+}
+
+struct ProcData<D> {
+    orig_proc: Option<WindowProc>,
+    window_data: D,
+}
+
+impl<D> ProcData<D> {
+    fn orig_proc(&self) -> WindowProc {
+        self.orig_proc.unwrap_or(::user32::DefWindowProcW)
+    }
+}
+
+unsafe extern "system" fn window_proc<W: WindowEvents>(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT { 
+    let mut handle = unwrap_or_ret!(WindowHandle::from_hwnd(hwnd), RET_ERR);
+
+    let mut handle = AssertRecoverSafe::new(&mut handle);
+     
+    let res = match msg {
+        WM_SHOWWINDOW => {
+            ::recover(||{
+                if wparam != 0 {
+                    W::on_show(&handle);
+                } else {
+                    W::on_hide(&handle);
+                }
+                
+                0
+            })
+        },
+        WM_DESTROY => {
+            let mut res = Some(RET_ERR);
+
+            if !thread::panicking() { 
+                res = ::recover(|| { W::on_destroy(&handle); 0 });
+            }
+
+            handle.cleanup();
+            res
+        },
+        _ => {
+            let mut res = ::recover(|| W::handle_msg(&handle, msg));
+            res
+        },
+    };
+
+    (handle.orig_proc())(hwnd, msg, wparam, lparam);
+
+    res.unwrap_or(RET_ERR)
+}
+

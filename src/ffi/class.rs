@@ -3,7 +3,7 @@ use winapi::*;
 
 use winstr::WinString;
 
-use super::WindowEvents;
+use super::traits::WindowEvents;
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -17,7 +17,7 @@ pub trait Class {
 }
 
 pub trait CustomClass {
-    type Events: super::WindowEvents;
+    type Events: WindowEvents;
 
     fn name() -> &'static str; 
  
